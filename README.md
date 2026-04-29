@@ -1,8 +1,15 @@
 # UDX Conversational BI POC
 
 ## Architecture
+
+### Path A — APIM Bridge (original)
 ```
 M365 Copilot Chat → Copilot Studio → APIM (public) → Foundry Agent (private) → APIM → Microsoft Learn MCP
+```
+
+### Path B — Azure Function Bridge (alternative)
+```
+M365 Copilot Chat → Copilot Studio → Azure Function (public, Entra ID auth) → Foundry Agent (private)
 ```
 
 ## Key Design: Standalone Foundry (No Hub)
@@ -16,8 +23,15 @@ This POC uses the **new standalone Foundry project model** (`Microsoft.Cognitive
 ## Project Structure
 ```
 infra/
-  main.bicep                  # All Azure infrastructure (IaC)
-  main.parameters.json        # Deployment parameters (location=eastus2)
+  main.bicep                  # Path A: APIM + Foundry infrastructure (IaC)
+  main.parameters.json        # Parameters for main.bicep (location=eastus2)
+  function-app.bicep          # Path B: Azure Function bridge infrastructure (IaC)
+  function-app.parameters.json # Parameters for function-app.bicep
+function-app/
+  function_app.py             # Azure Function: Foundry bridge endpoint
+  requirements.txt            # Python dependencies
+  host.json                   # Functions runtime config
+  local.settings.json         # Local dev settings
 scripts/
   create_agent.py             # Creates Foundry agent via AzureOpenAI SDK
   update_apim_policy.py       # Updates APIM invoke-agent policy with agent ID
@@ -46,6 +60,7 @@ docs/
 |--------|------|------------|---------|
 | apim-integration-subnet | 10.0.1.0/24 | Microsoft.Web/serverFarms | APIM outbound VNet integration |
 | private-endpoints-subnet | 10.0.2.0/24 | — | Private endpoints |
+| function-integration-subnet | 10.0.3.0/24 | Microsoft.Web/serverFarms | Function App outbound VNet integration (Path B) |
 
 ## Agent Details
 - **Assistant ID**: `asst_DTDTErUlSCNAsdk9hyezeAjJ`
@@ -53,6 +68,89 @@ docs/
 - **Endpoint**: `https://udxcbi-foundry-rqtovkuobfzg2.openai.azure.com/`
 - **APIM Endpoint**: `POST https://udxcbi-apim-rqtovkuobfzg2.azure-api.net/udx/foundry/invoke`
 - **APIM routes** to Assistants API (`/openai/threads/runs`) using managed identity auth
+
+---
+
+## Path B — Azure Function Bridge
+
+An alternative to APIM that uses an Azure Function App as the public-to-private bridge with **Entra ID pass-through authentication**.
+
+### Why use the Function approach?
+- Richer request/response shaping (correlation IDs, conversation mapping, timeout handling)
+- Native Entra ID Easy Auth — caller identity flows through to the Function code
+- Simpler VNet integration (no gateway configConnections API issues)
+- Built-in Application Insights telemetry
+
+### Additional Resources (Path B only)
+| Resource | Name | Type |
+|----------|------|------|
+| App Service Plan | udxcbi-asp-* | Elastic Premium (EP1, Linux) |
+| Function App | udxcbi-func-* | Python 3.11, VNet-integrated |
+| Storage Account | udxcbist* | Required by Functions runtime |
+| Application Insights | udxcbi-ai-* | Telemetry |
+| Log Analytics | udxcbi-law-* | App Insights backend |
+| RBAC | — | Cognitive Services OpenAI User (Function MI → Foundry) |
+
+### Authentication Flow
+```
+Copilot Studio → Entra ID token (OAuth) → Function App Easy Auth validates → Function code runs
+  → Function MI authenticates to Foundry (DefaultAzureCredential) → Private Foundry Agent
+```
+
+- **Inbound**: Entra ID Easy Auth enforces authentication; unauthenticated requests get `401`
+- **Outbound**: Function system-assigned managed identity calls Foundry (no secrets stored)
+- **Caller identity**: Available in `x-ms-client-principal-*` headers for audit/logging
+
+### Function Endpoint
+```
+POST https://<udxcbi-func-*.azurewebsites.net>/api/foundry-chat
+```
+
+**Request:**
+```json
+{
+  "message": "What was total sales last quarter by region?",
+  "copilotConversationId": "optional-copilot-conv-id",
+  "foundryConversationId": "optional-for-multi-turn",
+  "domainHint": "Sales"
+}
+```
+
+**Response:**
+```json
+{
+  "status": "succeeded",
+  "correlationId": "8f1f4c1a-...",
+  "answer": "Total sales last quarter were ...",
+  "foundryConversationId": "thread_abc123",
+  "foundryResponseId": "run_abc123",
+  "diagnostics": { "elapsedMs": 5240, "agentName": "UDX-Snowflake-Agent" }
+}
+```
+
+### Deploy Path B
+
+#### Prerequisites
+1. Create an Entra ID app registration with identifier URI `api://<client-id>`
+2. Note the client ID for the parameter below
+
+#### Deploy
+```bash
+az deployment group create \
+  --resource-group rgUDXConvBI \
+  --template-file infra/function-app.bicep \
+  --parameters infra/function-app.parameters.json \
+  --parameters functionAppClientId="<your-app-registration-client-id>" \
+  --name udxconvbi-func-deploy
+```
+
+#### Deploy Function code
+```bash
+cd function-app
+func azure functionapp publish <udxcbi-func-name>
+```
+
+---
 
 ## Deployment Steps
 
@@ -99,8 +197,11 @@ Follow [docs/copilot-studio-setup.md](docs/copilot-studio-setup.md).
 ## What's Automated vs Manual
 | Component | Method |
 |-----------|--------|
-| All Azure infrastructure | Bicep IaC (`infra/main.bicep`) |
+| All Azure infrastructure (Path A) | Bicep IaC (`infra/main.bicep`) |
+| Azure Function infrastructure (Path B) | Bicep IaC (`infra/function-app.bicep`) |
 | Foundry agent creation | Python script (`scripts/create_agent.py`, AzureOpenAI SDK) |
 | APIM APIs, backends, policies | Bicep IaC + Python script for policy update |
 | APIM VNet integration | Post-deploy script (`scripts/configure_vnet2.py`) |
+| Function App code deployment | Azure Functions Core Tools (`func azure functionapp publish`) |
+| Entra ID app registration (Path B) | **Manual** (portal or `az ad app create`) |
 | Copilot Studio agent | **Manual** (no IaC/API available) |
