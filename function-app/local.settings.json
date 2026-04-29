@@ -1,0 +1,11 @@
+{
+  "IsEncrypted": false,
+  "Values": {
+    "AzureWebJobsStorage": "UseDevelopmentStorage=true",
+    "FUNCTIONS_WORKER_RUNTIME": "python",
+    "FOUNDRY_PROJECT_ENDPOINT": "https://udxcbi-foundry-rqtovkuobfzg2.openai.azure.com",
+    "FOUNDRY_AGENT_NAME": "UDX-Snowflake-Agent",
+    "FOUNDRY_AGENT_ID": "asst_DTDTErUlSCNAsdk9hyezeAjJ",
+    "DEFAULT_TIMEOUT_SECONDS": "55"
+  }
+}

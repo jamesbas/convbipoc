@@ -1,0 +1,3 @@
+azure-functions
+azure-identity
+openai>=1.30.0
